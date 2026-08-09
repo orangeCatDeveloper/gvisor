@@ -2494,6 +2494,84 @@ func TestMountNewDir(t *testing.T) {
 	}
 }
 
+func TestBindMountCharDevice(t *testing.T) {
+	// Skip if /dev/kmsg is not present in the test environment (e.g. a
+	// sandboxed /dev), since it cannot be bind-mounted then.
+	const unimplementedSrc = "/dev/kmsg"
+	if _, err := os.Stat(unimplementedSrc); err != nil {
+		t.Skipf("%s not available to bind mount: %v", unimplementedSrc, err)
+	}
+	app, err := testutil.FindFile("test/cmd/test_app/test_app")
+	if err != nil {
+		t.Fatal("error finding test_app:", err)
+	}
+
+	// Overlay configs are excluded: with --overlay2=all, file mounts are
+	// wrapped in an overlay, which does not support device files as the
+	// lower layer's root (a pre-existing, separate limitation). Both gofer
+	// modes are covered: they cache the device numbers and open device files
+	// through independent code paths.
+	for name, conf := range configs(t, true /* noOverlay */) {
+		for _, directfs := range []bool{true, false} {
+			modeName := "lisafs"
+			if directfs {
+				modeName = "directfs"
+			}
+			for _, policy := range []config.CharacterDevicePolicy{
+				config.CharDevEmulatedOnly,
+				config.CharDevPreferEmulated,
+				config.CharDevPassthrough,
+			} {
+				t.Run(name+"/"+modeName+"/"+policy.String(), func(t *testing.T) {
+					conf.DirectFS = directfs
+					conf.CharacterDevicePolicy = policy
+					checkBindMountCharDevices(t, conf, app, unimplementedSrc)
+				})
+			}
+		}
+	}
+}
+
+// checkBindMountCharDevices runs the container once per device, checking with
+// chardev-check that the bind-mounted node has the expected device numbers
+// and open behavior under conf's --character-device-policy.
+func checkBindMountCharDevices(t *testing.T, conf *config.Config, app, unimplementedSrc string) {
+	// The mount destinations must be under a writable directory so that the
+	// gofer can create the mount point files (with docker, dockerd
+	// pre-creates the mount points in the container rootfs).
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "chardev-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+
+	wantUnimplementedOpen := "enxio"
+	if conf.CharacterDevicePolicy.AllowsPassthrough() {
+		wantUnimplementedOpen = "not-enxio"
+	}
+	for _, check := range []struct {
+		src  string
+		args []string
+	}{
+		{
+			src:  "/dev/null",
+			args: []string{"--want-rdev=1:3", "--want-open=ok", "--check-null-rw"},
+		},
+		{
+			src:  unimplementedSrc,
+			args: []string{"--want-rdev=1:11", "--want-open=" + wantUnimplementedOpen},
+		},
+	} {
+		dst := path.Join(dir, path.Base(check.src))
+		args := append([]string{app, "chardev-check", "--path=" + dst}, check.args...)
+		spec := testutil.NewSpecWithArgs(args...)
+		spec.Mounts = append(spec.Mounts,
+			specs.Mount{Destination: dst, Source: check.src, Type: "bind"})
+		if err := run(spec, conf); err != nil {
+			t.Fatalf("chardev-check of %s failed: %v", check.src, err)
+		}
+	}
+}
+
 func TestReadonlyRoot(t *testing.T) {
 	for name, conf := range configs(t, false /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
