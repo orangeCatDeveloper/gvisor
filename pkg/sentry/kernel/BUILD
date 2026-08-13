@@ -451,6 +451,7 @@ go_test(
     library = ":kernel",
     deps = [
         "//pkg/abi",
+        "//pkg/atomicbitops",
         "//pkg/context",
         "//pkg/errors/linuxerr",
         "//pkg/hostarch",
